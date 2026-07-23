@@ -1,0 +1,10 @@
+{
+  "name": "crosscheck",
+  "version": "0.1.0",
+  "description": "An independent second model reviews the diff your AI agent wrote and blocks turn completion until issues are addressed. Local, cross-model, zero-config. One model shouldn't grade its own homework.",
+  "author": {
+    "name": "Alexey",
+    "url": "https://github.com/karhuzin-lgtm"
+  },
+  "hooks": "./hooks/hooks.json"
+}

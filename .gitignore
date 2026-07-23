@@ -1,0 +1,21 @@
+# secrets / env — never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*secret*
+*token*
+credentials.json
+# node / python
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+dist/
+build/
+# os / editor
+.DS_Store
+*.log
+.crosscheck/

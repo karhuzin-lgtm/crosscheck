@@ -1,0 +1,38 @@
+#!/usr/bin/env python3
+"""crosscheck Stop-hook entry point.
+
+Thin launcher: makes the ``crosscheck`` package importable and delegates to
+``crosscheck.gate.main``. Kept intentionally tiny so all real logic lives in the
+package (and can be unit-tested without a hook harness).
+
+Claude Code sets ``CLAUDE_PLUGIN_ROOT`` to the plugin root at runtime; we prefer
+it, and fall back to resolving the path relative to this file so the script also
+works when invoked directly (e.g. in tests or a manual smoke test).
+"""
+
+import os
+import sys
+
+
+def _plugin_root() -> str:
+    root = os.environ.get("CLAUDE_PLUGIN_ROOT")
+    if root:
+        return root
+    # scripts/crosscheck-gate -> plugin root is the parent of this file's dir.
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def main() -> int:
+    sys.path.insert(0, _plugin_root())
+    try:
+        from crosscheck.gate import main as gate_main
+    except Exception as exc:  # pragma: no cover - import-time safety net
+        # Never wedge the user's session: if the package can't be imported,
+        # warn and allow the turn to end.
+        sys.stderr.write("crosscheck: failed to load (%s); allowing stop.\n" % exc)
+        return 0
+    return gate_main()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

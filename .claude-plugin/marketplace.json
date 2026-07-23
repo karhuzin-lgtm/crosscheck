@@ -1,0 +1,15 @@
+{
+  "name": "crosscheck",
+  "owner": { "name": "Aleksei", "url": "https://github.com/karhuzin-lgtm" },
+  "metadata": { "description": "Cross-model review gate for AI coding agents.", "version": "0.1.0" },
+  "plugins": [
+    {
+      "name": "crosscheck",
+      "source": "./",
+      "description": "An independent second model reviews the diff your AI agent wrote and blocks turn completion until the issues are addressed. Local, cross-model, zero-config. One model shouldn't grade its own homework.",
+      "author": { "name": "Aleksei", "url": "https://github.com/karhuzin-lgtm" },
+      "license": "MIT",
+      "keywords": ["claude-code","code-review","hooks","ai-agents","cross-model","stop-hook","codex","gemini"]
+    }
+  ]
+}
