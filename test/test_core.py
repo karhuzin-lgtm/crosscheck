@@ -117,6 +117,56 @@ class TestReviewParse(unittest.TestCase):
         self.assertFalse(review.parse("").parsed)
 
 
+class TestReviewHardening(unittest.TestCase):
+    """Untrusted reviewer output must be bounded (count, field length, control
+    chars) before it is embedded in the block reason shown to the author."""
+
+    def _parse(self, findings):
+        raw = json.dumps({"findings": findings, "verdict": "changes-requested"})
+        return review.parse(raw)
+
+    def test_finding_count_capped_at_50(self):
+        # A hostile reviewer flooding 100 findings must be capped to 50.
+        findings = [
+            {"severity": "warn", "category": "bug", "file": "f%d.py" % i,
+             "summary": "s%d" % i, "detail": "d%d" % i}
+            for i in range(100)
+        ]
+        res = self._parse(findings)
+        self.assertTrue(res.parsed)
+        self.assertEqual(len(res.findings), 50)
+
+    def test_long_fields_truncated(self):
+        # summary/detail/file over their limits are hard-truncated.
+        res = self._parse([{
+            "severity": "warn", "category": "bug",
+            "file": "f" * 500,
+            "summary": "s" * 1000,
+            "detail": "d" * 5000,
+        }])
+        self.assertEqual(len(res.findings), 1)
+        f = res.findings[0]
+        self.assertLessEqual(len(f.summary), 300)
+        self.assertLessEqual(len(f.detail), 1000)
+        self.assertLessEqual(len(f.file), 200)
+
+    def test_control_chars_stripped_but_tab_newline_kept(self):
+        # C0/C1/DEL control chars are stripped; \n and \t inside detail survive
+        # (they are harmless and needed for readable multi-line detail).
+        res = self._parse([{
+            "severity": "warn", "category": "bug", "file": "x.py",
+            "summary": "clean\x00sum\x1bmary\x07\x9b",
+            "detail": "line1\nline2\tcol\x00\x1b\x07\x9bend",
+        }])
+        self.assertEqual(len(res.findings), 1)
+        f = res.findings[0]
+        for bad in ("\x00", "\x1b", "\x07", "\x9b"):
+            self.assertNotIn(bad, f.summary)
+            self.assertNotIn(bad, f.detail)
+        self.assertIn("\n", f.detail)
+        self.assertIn("\t", f.detail)
+
+
 class TestConfig(unittest.TestCase):
     def test_defaults(self):
         with tempfile.TemporaryDirectory() as d:
@@ -169,16 +219,17 @@ class TestConfig(unittest.TestCase):
             self.assertEqual(cfg.provider, "auto")
 
     def test_file_upper_clamp(self):
-        # Hostile checked-in config with huge values must be clamped DOWN to the
-        # hard maxima (DoS/cost guard). Raising max_rounds is allowed, then capped.
+        # Resource budgets (max_rounds/timeout_sec/max_diff_bytes) are TRUSTED
+        # env-only. A hostile checked-in config setting huge values is IGNORED
+        # ENTIRELY (raising is a DoS/cost vector), so the defaults stand.
         with tempfile.TemporaryDirectory() as d:
             with open(os.path.join(d, ".crosscheck.json"), "w") as fh:
                 json.dump({"max_rounds": 9999, "timeout_sec": 999999,
                            "max_diff_bytes": 999_999_999}, fh)
             cfg = config.load(d)
-            self.assertEqual(cfg.max_rounds, 10)
-            self.assertEqual(cfg.timeout_sec, 600)
-            self.assertEqual(cfg.max_diff_bytes, 2_000_000)
+            self.assertEqual(cfg.max_rounds, 2)
+            self.assertEqual(cfg.timeout_sec, 120)
+            self.assertEqual(cfg.max_diff_bytes, 200_000)
 
 
 class TestDiffFilter(unittest.TestCase):
@@ -413,12 +464,14 @@ class TestConfigTrustBoundary(unittest.TestCase):
             else:
                 os.environ["CROSSCHECK_MAX_ROUNDS"] = saved
 
-    def test_project_may_raise_max_rounds(self):
-        # Raising max_rounds (more review passes) is the strengthening direction.
+    def test_project_cannot_raise_max_rounds(self):
+        # max_rounds is a TRUSTED env-only resource budget: a project file value
+        # is IGNORED ENTIRELY (raising it is a DoS/cost vector), so the default
+        # baseline stands.
         with tempfile.TemporaryDirectory() as d:
             self._write(d, {"max_rounds": 5})
             cfg = config.load(d)
-            self.assertEqual(cfg.max_rounds, 5)
+            self.assertEqual(cfg.max_rounds, 2)
 
     def test_project_include_exclude_ignored(self):
         # A hostile repo must not shrink coverage via include/exclude.
@@ -817,12 +870,14 @@ class TestConfigStrengthenOnlyBudgets(unittest.TestCase):
             cfg = config.load(d)
             self.assertEqual(cfg.timeout_sec, 120)
 
-    def test_project_timeout_above_baseline_honored(self):
-        # Raising the reviewer time budget is the strengthening direction.
+    def test_project_timeout_above_baseline_ignored(self):
+        # timeout_sec is a TRUSTED env-only resource budget: a project file value
+        # is IGNORED ENTIRELY (raising it is a DoS/cost vector), so the default
+        # baseline stands.
         with tempfile.TemporaryDirectory() as d:
             self._write(d, {"timeout_sec": 300})
             cfg = config.load(d)
-            self.assertEqual(cfg.timeout_sec, 300)
+            self.assertEqual(cfg.timeout_sec, 120)
 
     def test_project_timeout_below_env_baseline_ignored(self):
         # Baseline may come from env; a project value below it is still ignored.
@@ -847,12 +902,14 @@ class TestConfigStrengthenOnlyBudgets(unittest.TestCase):
             cfg = config.load(d)
             self.assertEqual(cfg.max_diff_bytes, 200_000)
 
-    def test_project_max_diff_bytes_above_baseline_honored(self):
-        # Raising the diff budget (review MORE) is the strengthening direction.
+    def test_project_max_diff_bytes_above_baseline_ignored(self):
+        # max_diff_bytes is a TRUSTED env-only resource budget: a project file
+        # value is IGNORED ENTIRELY (raising it is a DoS/cost vector), so the
+        # default baseline stands.
         with tempfile.TemporaryDirectory() as d:
             self._write(d, {"max_diff_bytes": 500_000})
             cfg = config.load(d)
-            self.assertEqual(cfg.max_diff_bytes, 500_000)
+            self.assertEqual(cfg.max_diff_bytes, 200_000)
 
     def test_project_model_ignored_default_wins(self):
         # model is TRUSTED env-only; a project file model is IGNORED entirely so

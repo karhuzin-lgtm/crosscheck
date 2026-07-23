@@ -19,16 +19,16 @@ to the trusted (env/default) baseline — it can never weaken it:
   is IGNORED. Disabling is possible only via env/defaults.
 - ``threshold``: the project file may LOWER it (a lower floor catches more:
   nit < warn < blocker); it may NOT raise it above the trusted baseline.
-- ``max_rounds``: the project file may RAISE it; it may NOT lower it below the
-  trusted baseline.
-- ``timeout_sec``: the project file may RAISE it (more time = the reviewer is
-  less likely to spuriously time out and fail open); it may NOT lower it below
-  the trusted baseline (a hostile ``timeout_sec=1`` that forces a fail-open
-  bypass is IGNORED). Still hard-clamped to the upper maximum.
-- ``max_diff_bytes``: the project file may RAISE it (review MORE of the diff);
-  it may NOT lower it below the trusted baseline (a hostile
-  ``max_diff_bytes=1000`` that truncates most of the diff away is IGNORED).
-  Still hard-clamped to the upper maximum.
+- ``max_rounds`` / ``timeout_sec`` / ``max_diff_bytes``: TRUSTED, env-only. These
+  are RESOURCE budgets, and moving them in EITHER direction from an untrusted repo
+  is an attack: RAISING them (up to 10 rounds x 600s over a 2 MB diff) is a
+  DoS/cost vector that can wedge every Stop hook for minutes and rack up reviewer
+  spend, while LOWERING them weakens the gate (a hostile ``timeout_sec=1`` forces
+  a fail-open bypass; ``max_diff_bytes=1000`` truncates the diff to hide issues).
+  So a ``max_rounds`` / ``timeout_sec`` / ``max_diff_bytes`` key in the project
+  file is IGNORED ENTIRELY. The values come only from ``CROSSCHECK_MAX_ROUNDS`` /
+  ``CROSSCHECK_TIMEOUT`` / ``CROSSCHECK_MAX_DIFF_BYTES`` (or the built-in
+  defaults), and ``load()`` still hard-clamps those env values to sane maxima.
 - ``fail_open``: the project file may only (re)affirm ``true``; a false value is
   IGNORED (strict mode can only come from env/defaults).
 - ``provider``: the project file may only select ``auto`` or ``codex`` (the
@@ -222,11 +222,8 @@ def _apply_file(cfg: Config, data: Dict[str, Any]) -> None:
     """
     if not isinstance(data, dict):
         return
-    # Capture the trusted baseline for the strengthen-only fields before we mutate.
+    # Capture the trusted baseline for the strengthen-only threshold before we mutate.
     base_threshold = cfg.threshold
-    base_max_rounds = cfg.max_rounds
-    base_timeout = cfg.timeout_sec
-    base_max_diff = cfg.max_diff_bytes
 
     known = {f.name for f in fields(Config)}
     for key, value in data.items():
@@ -250,25 +247,6 @@ def _apply_file(cfg: Config, data: Dict[str, Any]) -> None:
             candidate = _normalize_threshold(value, base_threshold)
             if _threshold_rank(candidate) <= _threshold_rank(base_threshold):
                 cfg.threshold = candidate
-        elif key == "max_rounds":
-            # UNTRUSTED: may only RAISE max_rounds, never lower it below baseline.
-            candidate = _to_int(value, base_max_rounds)
-            if candidate >= base_max_rounds:
-                cfg.max_rounds = candidate
-        elif key == "timeout_sec":
-            # UNTRUSTED: may only RAISE the reviewer time budget, never lower it
-            # below the trusted baseline. A hostile timeout_sec=1 forces the
-            # reviewer to time out -> fail-open bypass, so it is IGNORED.
-            candidate = _to_int(value, base_timeout)
-            if candidate >= base_timeout:
-                cfg.timeout_sec = candidate
-        elif key == "max_diff_bytes":
-            # UNTRUSTED: may only RAISE the diff budget (review MORE), never lower
-            # it below baseline. A hostile max_diff_bytes=1000 truncates most of
-            # the diff away (hiding issues), so it is IGNORED.
-            candidate = _to_int(value, base_max_diff)
-            if candidate >= base_max_diff:
-                cfg.max_diff_bytes = candidate
         elif key == "provider":
             # UNTRUSTED: never override an env-pinned provider; and may only
             # select the OS-sandboxed auto/codex path. Any other value (gemini/
@@ -277,10 +255,13 @@ def _apply_file(cfg: Config, data: Dict[str, Any]) -> None:
                 candidate = str(value).strip().lower()
                 if candidate in _PROJECT_ALLOWED_PROVIDERS:
                     cfg.provider = candidate
-        # NOTE: model, command and include/exclude from the project file are
+        # NOTE: model, command, include/exclude AND the resource budgets
+        # (max_rounds / timeout_sec / max_diff_bytes) from the project file are
         # intentionally IGNORED. model/command are TRUSTED env-only fields (a
         # hostile repo must not steer the reviewer model or inject a command);
-        # include/exclude must not be shrinkable by a hostile repo.
+        # include/exclude must not be shrinkable by a hostile repo; and the
+        # resource budgets are env-only because moving them either way is an
+        # attack (raise -> DoS/cost, lower -> weaken the gate).
 
 
 def _read_config_file(path: str) -> Optional[Dict[str, Any]]:

@@ -9,6 +9,7 @@ be clean JSON.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,25 @@ from .config import Config
 # Severity ordering: nit < warn < blocker.
 SEVERITY_ORDER = {"nit": 0, "warn": 1, "blocker": 2}
 VALID_CATEGORIES = {"bug", "security", "perf", "logic", "style"}
+
+# Hard caps on reviewer-controlled finding text. The reviewer output is UNTRUSTED
+# (a prompt-injecting diff could steer it) and is later embedded in the block
+# reason handed back to the AUTHOR agent, so we bound the number of findings and
+# the length of every field, and strip control characters. This prevents a
+# malicious reviewer from bloating the hook response toward the 1 MB limit and
+# shrinks the surface for instructions/escape sequences smuggled through the
+# free-text fields.
+_MAX_FINDINGS = 50
+_MAX_FILE_CHARS = 200
+_MAX_SUMMARY_CHARS = 300
+_MAX_DETAIL_CHARS = 1000
+
+# Control characters to strip from untrusted reviewer text: the C0 range
+# (\x00-\x08, \x0b-\x1f), DEL (\x7f), and the C1 range (\x80-\x9f). We KEEP \t (\x09)
+# and \n (\x0a) — they are harmless and needed for readable multi-line detail.
+# The rest can smuggle terminal escape sequences / cursor tricks into the block
+# reason shown to the author agent.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 _PROMPT_TEMPLATE = """\
 You are an INDEPENDENT senior code reviewer. Another AI wrote the change below and
@@ -128,6 +148,18 @@ def _coerce_line(value: Any) -> Optional[int]:
         return None
 
 
+def _clip(value: Any, limit: int) -> str:
+    """Sanitize one untrusted reviewer string field.
+
+    Strips control characters (keeping \\t and \\n), trims surrounding
+    whitespace, and hard-truncates to ``limit`` characters. The reviewer output
+    is UNTRUSTED (a prompt-injecting diff could steer it) and is embedded in the
+    block reason handed to the author agent, so every free-text field is bounded.
+    """
+    text = _CONTROL_CHARS.sub("", str(value)).strip()
+    return text[:limit]
+
+
 def _normalize_finding(raw: Dict[str, Any]) -> Optional[Finding]:
     if not isinstance(raw, dict):
         return None
@@ -138,9 +170,9 @@ def _normalize_finding(raw: Dict[str, Any]) -> Optional[Finding]:
     category = str(raw.get("category", "")).strip().lower()
     if category not in VALID_CATEGORIES:
         category = "logic"
-    summary = str(raw.get("summary", "")).strip() or "(no summary provided)"
-    detail = str(raw.get("detail", "")).strip()
-    file = str(raw.get("file", "")).strip() or "?"
+    summary = _clip(raw.get("summary", ""), _MAX_SUMMARY_CHARS) or "(no summary provided)"
+    detail = _clip(raw.get("detail", ""), _MAX_DETAIL_CHARS)
+    file = _clip(raw.get("file", ""), _MAX_FILE_CHARS) or "?"
     return Finding(
         severity=severity,
         category=category,
@@ -172,6 +204,10 @@ def parse(raw_text: str) -> ReviewResult:
         finding = _normalize_finding(item)
         if finding is not None:
             findings.append(finding)
+            # Cap the finding count so a hostile reviewer can't bloat the
+            # response (toward the 1 MB hook limit) with endless findings.
+            if len(findings) >= _MAX_FINDINGS:
+                break
 
     verdict = str(data.get("verdict", "")).strip().lower()
     if verdict not in ("pass", "changes-requested"):
