@@ -10,6 +10,7 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-1a1a1a.svg)](https://www.python.org)
 [![Zero dependencies](https://img.shields.io/badge/deps-0-1a1a1a.svg)](#)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D2662F.svg)](https://code.claude.com)
+[![tests](https://github.com/karhuzin-lgtm/crosscheck/actions/workflows/tests.yml/badge.svg)](https://github.com/karhuzin-lgtm/crosscheck/actions/workflows/tests.yml)
 
 </div>
 
