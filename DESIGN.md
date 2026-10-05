@@ -67,3 +67,9 @@ Repo: karhuzin-lgtm/crosscheck (PUBLIC).
 - Exit-code semantics (0 vs 2) for Stop.
 - Canonical PLUGIN layout + install/marketplace flow + exact one-line install for README.
 - Settings merge order (user/project/local).
+
+## v0.2 — beyond the hook
+- `engine.py`: one review path shared by the Stop hook and the CLI. Single reviewer, or a JURY (CROSSCHECK_JURY / --jury) run in parallel. Findings are merged across jurors (same file, lines within ±3, same category or similar wording), each carries `reviewers[]`, and `quorum` sets how many jurors must agree to block (capped at the jurors that actually answered). A juror that fails or returns garbage is reported, not trusted as a pass. If all jurors fail, the fail-open/strict policy applies.
+- `cli.py`: standalone `crosscheck` (worktree / --staged / --base REF / stdin), `stats`, `doctor`, `install-hook`, `demo` (offline, simulated, labeled as such, never recorded).
+- `stats.py`: counts-only local tally in a 0700 state dir, written atomically, never raises. It feeds the terminal card, the shields.io badge and the SVG card.
+- Trust: jury/quorum/stats are env/flag-only. A project file can't multiply reviewer spend or raise the quorum to defang the gate.

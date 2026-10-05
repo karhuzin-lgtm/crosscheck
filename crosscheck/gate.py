@@ -27,8 +27,9 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
-from . import config, diff, providers, redact, review
-from .providers import ProviderError, Reviewer
+from . import config, diff, engine, redact, stats
+from .state import _ensure_private_dir, _verify_private_dir  # noqa: F401 (re-exported)
+from .providers import ProviderError
 from .review import Finding
 
 
@@ -45,44 +46,6 @@ def _state_base() -> str:
     if os.name == "nt":
         return os.path.join(tempfile.gettempdir(), "crosscheck")
     return os.path.join(tempfile.gettempdir(), "crosscheck-%d" % os.getuid())
-
-
-def _verify_private_dir(path: str) -> bool:
-    """True iff ``path`` is a real directory, owned by us, and not a symlink.
-
-    Uses ``lstat`` so a symlink is caught (its lstat is not a directory). The
-    uid check is skipped on Windows, which lacks POSIX ownership semantics.
-    """
-    try:
-        st = os.lstat(path)
-    except OSError:
-        return False
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-        return False
-    if os.name != "nt" and st.st_uid != os.getuid():
-        return False
-    return True
-
-
-def _ensure_private_dir(path: str) -> bool:
-    """Create ``path`` (mode 0700) if needed and verify it is ours + a real dir.
-
-    Returns False on any problem so the caller can degrade gracefully. Perms are
-    tightened explicitly after creation (umask can otherwise loosen makedirs),
-    and only after the symlink/ownership check has passed.
-    """
-    try:
-        os.makedirs(path, mode=0o700, exist_ok=True)
-    except OSError:
-        return False
-    if not _verify_private_dir(path):
-        return False
-    if os.name != "nt":
-        try:
-            os.chmod(path, 0o700)
-        except OSError:
-            return False
-    return True
 
 
 def _state_dir(session_id: str) -> Optional[str]:
@@ -173,16 +136,23 @@ def _note(text: str) -> None:
 
 
 def _format_block_reason(
-    reviewer: Reviewer, blocking: List[Finding], round_no: int, cfg: config.Config
+    verdict: engine.Verdict, blocking: List[Finding], round_no: int, cfg: config.Config
 ) -> str:
+    jury = verdict.jury_size > 1
+    who = ", ".join(verdict.reviewers)
     header = (
-        "crosscheck: an independent reviewer (%s) found %d issue(s) that should "
-        "be addressed before finishing:" % (reviewer.display, len(blocking))
+        "crosscheck: %s (%s) found %d issue(s) that should be addressed before "
+        "finishing:"
+        % ("a jury of independent reviewers" if jury else "an independent reviewer",
+           who, len(blocking))
     )
     lines: List[str] = [header, ""]
     for f in blocking:
         loc = f.file + (":%d" % f.line if f.line else "")
-        lines.append("[%s] %s — %s" % (f.severity.upper(), loc, f.summary))
+        agree = (
+            " (flagged by %s)" % ", ".join(f.reviewers) if jury else ""
+        )
+        lines.append("[%s] %s — %s%s" % (f.severity.upper(), loc, f.summary, agree))
         if f.detail:
             lines.append("  " + f.detail)
     lines.append("")
@@ -190,7 +160,7 @@ def _format_block_reason(
         "Fix the issues above, then finish. (crosscheck round %d/%d)"
         % (round_no, cfg.max_rounds)
     )
-    if reviewer.warn_same_vendor:
+    if verdict.same_vendor:
         lines.append(
             "Note: the reviewer shares a vendor with the author (Claude reviewing "
             "Claude). Install `codex` or `gemini` for a true cross-model second "
@@ -245,59 +215,23 @@ def _run_gate(data: Dict[str, Any], cwd: str, session_id: str, cfg: config.Confi
         _write_int(rounds_path, 0)  # nothing to review -> fresh slate
         return 0
 
-    # 2. Never let secrets leave the machine.
-    redacted, n_redacted = redact.redact(review_diff)
-    if n_redacted:
-        _note("redacted %d secret(s) from the diff before review." % n_redacted)
-
-    # 3. Pick the independent reviewer (may fail-open on missing CLI).
+    # 2+3+4. Redact, ask the independent reviewer(s), redact their output, merge.
     try:
-        reviewer = providers.resolve(cfg)
+        verdict = engine.run_review(review_diff, cfg, _note)
     except ProviderError as exc:
         return _fail(cfg, str(exc))
+    for failure in verdict.failures:
+        _note("juror unavailable — %s" % failure)
 
-    # Be honest about the reviewer's isolation. codex --sandbox read-only blocks
-    # WRITES only; gemini/claude/command (reachable only behind an explicit env
-    # opt-in) have not even that. NO reviewer is isolated from filesystem READS,
-    # so a prompt-injecting diff could induce any of them to read local files;
-    # redaction (in and out) is the mitigation, not the reviewer sandbox.
-    if not reviewer.sandboxed:
-        _note(
-            "reviewer '%s' has no write-sandbox (codex uses --sandbox read-only, "
-            "which blocks writes). No reviewer is isolated from filesystem reads: "
-            "a prompt-injecting diff could induce it to read local files. "
-            "Redaction of the diff and the output is the mitigation." % reviewer.display
-        )
-
-    # 4. Ask it to grade the diff.
-    prompt = review.build_prompt(redacted, cfg)
-    try:
-        raw_output = providers.run(reviewer, prompt, cfg.timeout_sec)
-    except ProviderError as exc:
-        return _fail(cfg, str(exc))
-
-    # Defense-in-depth: the reviewer is not filesystem-sandboxed, so a prompt
-    # injection could induce it to surface a local secret in its findings. Redact
-    # its OUTPUT with the same masks we applied to the input, BEFORE it reaches
-    # the parser / block reason / stderr.
-    raw_output, n_out_redacted = redact.redact(raw_output)
-    if n_out_redacted:
-        _note(
-            "redacted %d secret(s) from the reviewer's OUTPUT before use."
-            % n_out_redacted
-        )
-
-    result = review.parse(raw_output)
-    if not result.parsed:
-        return _fail(cfg, "reviewer output could not be parsed as findings JSON")
-
-    blocking = result.at_or_above(cfg.threshold)
+    blocking = verdict.blocking(cfg.threshold, cfg.quorum)
+    if cfg.stats:
+        stats.record(verdict.findings, blocking, verdict.reviewers, bool(blocking))
 
     if blocking:
         round_no = rounds + 1
         _write_int(rounds_path, round_no)
         _write_int(tally_path, _read_int(tally_path) + len(blocking))
-        _emit_block(_format_block_reason(reviewer, blocking, round_no, cfg))
+        _emit_block(_format_block_reason(verdict, blocking, round_no, cfg))
         _note(
             "blocked turn — %d issue(s) at/above '%s' (round %d/%d)."
             % (len(blocking), cfg.threshold, round_no, cfg.max_rounds)
@@ -306,7 +240,7 @@ def _run_gate(data: Dict[str, Any], cwd: str, session_id: str, cfg: config.Confi
 
     # Passed the threshold. Reset the loop and report the tally.
     _write_int(rounds_path, 0)
-    total = len(result.findings)
+    total = len(verdict.findings)
     session_caught = _read_int(tally_path)
     if total:
         _note(
@@ -314,7 +248,7 @@ def _run_gate(data: Dict[str, Any], cwd: str, session_id: str, cfg: config.Confi
             % (total, cfg.threshold)
         )
     else:
-        _note("passed — reviewer (%s) found no issues." % reviewer.display)
+        _note("passed — reviewer (%s) found no issues." % ", ".join(verdict.reviewers))
     if session_caught:
         _note("%d issue(s) caught so far this session." % session_caught)
     return 0

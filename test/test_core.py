@@ -10,7 +10,10 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from crosscheck import redact, review, config, diff, gate
+# Never touch the real ~/.local/state from tests.
+os.environ.setdefault("CROSSCHECK_STATE_DIR", tempfile.mkdtemp(prefix="cc-test-state-"))
+
+from crosscheck import redact, review, config, diff, gate  # noqa: E402
 
 
 class TestRedact(unittest.TestCase):

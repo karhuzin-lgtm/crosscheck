@@ -1,0 +1,7 @@
+- id: crosscheck
+  name: crosscheck (independent AI review of staged changes)
+  entry: crosscheck review --staged
+  language: python
+  pass_filenames: false
+  stages: [pre-commit]
+  require_serial: true
