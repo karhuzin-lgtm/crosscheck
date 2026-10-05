@@ -8,6 +8,8 @@ plain hand-written code — anything that ends up as a git diff:
     crosscheck --base main          review this branch vs main (PR view)
     git diff | crosscheck -         review any diff from stdin
     crosscheck --jury codex,gemini  several independent models; show agreement
+    crosscheck --jury codex,ollama  mix a cloud model with a local one
+    crosscheck --sarif              SARIF for GitHub code scanning
     crosscheck stats                what crosscheck has caught for you
     crosscheck doctor               which reviewers are installed and how they run
     crosscheck install-hook         run crosscheck on every `git commit`
@@ -30,7 +32,7 @@ import threading
 import time
 from typing import List, Optional
 
-from . import __version__, config, diff, engine, providers, stats, ui
+from . import __version__, config, diff, engine, providers, sarif, stats, ui
 from .providers import ProviderError
 from .review import Finding
 
@@ -164,7 +166,8 @@ def _render(
 
 
 def cmd_review(args: argparse.Namespace) -> int:
-    p = ui.Painter(ui.use_color(sys.stdout) and not args.json)
+    machine = args.json or args.sarif
+    p = ui.Painter(ui.use_color(sys.stdout) and not machine)
     perr = ui.Painter(ui.use_color(sys.stderr))
     cwd = _git_toplevel(os.getcwd())
     cfg = _apply_flags(config.load(cwd), args)
@@ -181,7 +184,9 @@ def cmd_review(args: argparse.Namespace) -> int:
         sys.stderr.write("crosscheck: %s\n" % exc)
         return 2
     if not review_diff:
-        if args.json:
+        if args.sarif:
+            print(json.dumps(sarif.build([]), indent=2))
+        elif args.json:
             print(json.dumps({"verdict": "pass", "reviewed": False, "findings": []}))
         else:
             note("nothing to review.")
@@ -190,7 +195,7 @@ def cmd_review(args: argparse.Namespace) -> int:
     files, added, removed = diff.summarize(review_diff)
     summary = "%d file%s (+%d −%d)" % (files, "" if files == 1 else "s", added, removed)
     names = ", ".join(engine.juror_names(cfg))
-    spin = not args.json and sys.stderr.isatty()
+    spin = not machine and sys.stderr.isatty()
     try:
         with _Spinner(perr, "reviewing %s with %s…" % (summary, names), spin):
             verdict = engine.run_review(review_diff, cfg, note)
@@ -210,8 +215,10 @@ def cmd_review(args: argparse.Namespace) -> int:
     if cfg.stats:
         stats.record(verdict.findings, blocking, verdict.reviewers, bool(blocking))
 
-    if args.json:
-        blocking_ids = {id(f) for f in blocking}
+    blocking_ids = {id(f) for f in blocking}
+    if args.sarif:
+        print(json.dumps(sarif.build(verdict.findings, blocking_ids), indent=2))
+    elif args.json:
         print(json.dumps({
             "verdict": "changes-requested" if blocking else "pass",
             "reviewed": True,
@@ -275,12 +282,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ("codex", "OpenAI · write-sandboxed (--sandbox read-only) · used by `auto`"),
         ("gemini", "Google · no OS sandbox · needs CROSSCHECK_ALLOW_UNSANDBOXED=1"),
         ("claude", "Anthropic · no OS sandbox · needs CROSSCHECK_ALLOW_UNSANDBOXED=1"),
+        ("ollama", "local model · no tools, can't touch files · default %s"
+         % providers.DEFAULT_OLLAMA_MODEL),
     ):
         try:
             path = providers._resolve_binary(name)
         except ProviderError:
             path = None
-        usable = path is not None and (name == "codex" or opt_in)
+        usable = path is not None and (name in ("codex", "ollama") or opt_in)
         found += 1 if usable else 0
         mark = p("✓", "green") if usable else (p("~", "yellow") if path else p("✗", "red"))
         print("  %s %-7s %s" % (mark, name, p(path or "not installed", "dim")))
@@ -295,8 +304,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     print("  stats      %s" % (stats.path() if cfg.stats else "off"))
     print()
     if not found:
-        print(p("No usable reviewer yet. Fastest path: install codex (npm i -g @openai/codex), "
-                "then run `codex login`.", "yellow"))
+        print(p("No usable reviewer yet. Fastest path: install codex (npm i -g @openai/codex) "
+                "and run `codex login` — or, fully local and free, install ollama and "
+                "`ollama pull %s`." % providers.DEFAULT_OLLAMA_MODEL, "yellow"))
         return 1
     if found == 1 and not cfg.jury:
         print(p("Tip: with two reviewers installed, try `crosscheck --jury codex,gemini` — "
@@ -454,13 +464,15 @@ def build_parser() -> argparse.ArgumentParser:
     src = r.add_mutually_exclusive_group()
     src.add_argument("--staged", action="store_true", help="review staged changes only")
     src.add_argument("--base", metavar="REF", help="review this branch vs REF (merge-base), like a PR")
-    r.add_argument("--jury", metavar="A,B", help="run several reviewers, e.g. codex,gemini")
+    r.add_argument("--jury", metavar="A,B", help="run several reviewers, e.g. codex,ollama:qwen2.5-coder:7b")
     r.add_argument("--quorum", type=int, metavar="N", help="jurors that must agree for a finding to block")
-    r.add_argument("--provider", help="single reviewer: auto|codex|gemini|claude|command")
+    r.add_argument("--provider", help="single reviewer: auto|codex|gemini|claude|ollama[:model]|command")
     r.add_argument("--threshold", choices=config.VALID_THRESHOLDS, help="minimum severity that fails")
     r.add_argument("--timeout", type=int, metavar="SEC", help="reviewer time budget")
     r.add_argument("--strict", action="store_true", help="exit 2 if the review can't run (no fail-open)")
-    r.add_argument("--json", action="store_true", help="machine-readable output")
+    fmt = r.add_mutually_exclusive_group()
+    fmt.add_argument("--json", action="store_true", help="machine-readable output")
+    fmt.add_argument("--sarif", action="store_true", help="SARIF 2.1.0 (GitHub code scanning)")
     r.add_argument("--no-stats", action="store_true", help="don't count this run in `crosscheck stats`")
     r.set_defaults(func=cmd_review)
 

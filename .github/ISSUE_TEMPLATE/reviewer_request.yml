@@ -1,0 +1,20 @@
+name: Reviewer or integration request
+description: Ask for a new reviewer model/CLI or tool integration
+labels: [enhancement]
+body:
+  - type: input
+    id: tool
+    attributes:
+      label: Which reviewer or tool?
+      placeholder: e.g. aider, cursor-agent, LM Studio, a GitHub Action
+    validations: { required: true }
+  - type: textarea
+    id: invoke
+    attributes:
+      label: How is it run non-interactively?
+      description: The command that takes a prompt on stdin (or as an argument) and prints the answer.
+  - type: textarea
+    id: trust
+    attributes:
+      label: Can it read files or run commands on its own?
+      description: This decides whether it needs the unsandboxed opt-in.

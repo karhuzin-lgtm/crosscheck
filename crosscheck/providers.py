@@ -32,6 +32,7 @@ any provider can be overridden entirely via the ``command`` provider + config.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shlex
 import shutil
@@ -40,7 +41,7 @@ import subprocess
 import tempfile
 import threading
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import redact
 from .config import Config
@@ -81,7 +82,19 @@ _ARGV = {
     "gemini": ["gemini"],
     # Anthropic Claude CLI, print mode. Prompt on stdin.
     "claude": ["claude", "-p"],
+    # Ollama, a LOCAL model server. `ollama run MODEL` reads the prompt on stdin
+    # and prints the completion. It is a plain text model with no tools: it
+    # cannot read or write files or run commands, so it needs no sandbox opt-in.
+    # The model name is appended in _build_cli.
+    "ollama": ["ollama", "run"],
 }
+
+# Model used for ollama when none is given (``--jury codex,ollama`` or
+# ``ollama:<model>`` to pick another). A small, strong code model.
+DEFAULT_OLLAMA_MODEL = "qwen2.5-coder:7b"
+
+# Reviewers that are plain models with NO tool access (no file reads, no shell).
+_TOOLLESS = ("ollama",)
 
 # Per-provider flag used to pin a specific model, when config.model is set.
 _MODEL_FLAG = {
@@ -112,10 +125,17 @@ class Reviewer:
     warn_same_vendor: bool = False
     sanitized: bool = True
     sandboxed: bool = False
+    # False for plain text models (ollama) that cannot read files or run
+    # commands at all — the read-access warning does not apply to them.
+    tools: bool = True
+    # Model pinned for this reviewer, if any (shown in its display name).
+    model: Optional[str] = None
+    # Extra env vars passed through the sanitized environment (e.g. OLLAMA_HOST).
+    env_passthrough: Tuple[str, ...] = ()
 
     @property
     def display(self) -> str:
-        return self.name
+        return "%s:%s" % (self.name, self.model) if self.model else self.name
 
 
 def _resolve_binary(name: str) -> str:
@@ -180,7 +200,16 @@ def resolve(cfg: Config) -> Reviewer:
     file. Without the opt-in, a gemini/claude request from ANY source silently
     falls back to ``auto`` (the codex-only, OS-sandboxed path).
     """
-    provider = (cfg.provider or "auto").strip().lower()
+    # A provider may carry its own model: "ollama:qwen2.5-coder:7b", "codex:gpt-5".
+    # Split on the FIRST colon only (ollama model tags contain colons).
+    spec = (cfg.provider or "auto").strip()
+    name, sep, model = spec.partition(":")
+    provider = name.strip().lower()
+    if sep:
+        model = model.strip()
+        if not model or model.startswith("-") or any(c.isspace() for c in model):
+            raise ProviderError("invalid model in reviewer spec %r." % spec)
+        cfg = dataclasses.replace(cfg, model=model)
 
     # Unsandboxed reviewers require an explicit trusted (env) opt-in. Without it,
     # fall back to the sandboxed auto path rather than run them on an untrusted diff.
@@ -238,6 +267,19 @@ def _build_cli(name: str, cfg: Config, warn_same_vendor: bool) -> Reviewer:
     resolved = _resolve_binary(name)  # absolute path or ProviderError (fail-open)
     argv = list(_ARGV[name])
     argv[0] = resolved
+    if name == "ollama":
+        model = cfg.model or DEFAULT_OLLAMA_MODEL
+        if model.startswith("-"):
+            raise ProviderError("invalid ollama model %r." % model)
+        return Reviewer(
+            name=name,
+            argv=argv + [model],
+            sanitized=True,
+            sandboxed=False,
+            tools=False,
+            model=model,
+            env_passthrough=("OLLAMA_HOST",),
+        )
     if cfg.model and name in _MODEL_FLAG:
         # Insert the model flag right after the base binary/subcommand tokens.
         flag = _MODEL_FLAG[name]
@@ -249,6 +291,7 @@ def _build_cli(name: str, cfg: Config, warn_same_vendor: bool) -> Reviewer:
         warn_same_vendor=warn_same_vendor,
         sanitized=True,
         sandboxed=(name == "codex"),
+        model=cfg.model,
     )
 
 
@@ -260,7 +303,7 @@ def _inject_model(name: str, argv: List[str], flag: str, model: str) -> List[str
     return argv + [flag, model]
 
 
-def _sanitized_env() -> Dict[str, str]:
+def _sanitized_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
     """Minimal env for built-in reviewer subprocesses.
 
     Only a fixed-safe PATH plus HOME and locale vars survive; every other var
@@ -272,7 +315,7 @@ def _sanitized_env() -> Dict[str, str]:
     """
     src = os.environ
     env: Dict[str, str] = {"PATH": _SAFE_PATH}
-    for key in ("HOME", "LANG", "LC_ALL", "LC_CTYPE"):
+    for key in ("HOME", "LANG", "LC_ALL", "LC_CTYPE") + tuple(extra):
         val = src.get(key)
         if val:
             env[key] = val
@@ -394,7 +437,7 @@ def run(reviewer: Reviewer, prompt: str, timeout_sec: int) -> str:
     # removed on EVERY exit path, so it is created here and torn down in ``finally``.
     rev_cwd: Optional[str] = None
     if reviewer.sanitized:
-        env: Optional[Dict[str, str]] = _sanitized_env()
+        env: Optional[Dict[str, str]] = _sanitized_env(reviewer.env_passthrough)
         rev_cwd = tempfile.mkdtemp(prefix="crosscheck-rev-")  # 0700, unique, ours
         cwd: Optional[str] = rev_cwd
     else:

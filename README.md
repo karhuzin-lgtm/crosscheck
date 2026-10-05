@@ -1,16 +1,22 @@
 <div align="center">
 
-# crosscheck
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/banner-dark.svg">
+  <img src="docs/banner-light.svg" width="640" alt="crosscheck — one model shouldn't grade its own homework">
+</picture>
 
-### One model shouldn't grade its own homework.
+**An independent AI model, or a jury of them, reviews the code your AI wrote *before* you accept it.**
 
-**An independent second model reviews the code your AI wrote — *before* you accept it.**
+<sub>Works with Cursor · Copilot · Claude Code · Codex · Aider · plain git — reviewers: Codex · Gemini · Claude · local models via Ollama</sub>
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-D2662F.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-1a1a1a.svg)](https://www.python.org)
 [![Zero dependencies](https://img.shields.io/badge/deps-0-1a1a1a.svg)](#)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-D2662F.svg)](https://code.claude.com)
 [![tests](https://github.com/karhuzin-lgtm/crosscheck/actions/workflows/tests.yml/badge.svg)](https://github.com/karhuzin-lgtm/crosscheck/actions/workflows/tests.yml)
+[![SARIF](https://img.shields.io/badge/output-SARIF%202.1-1a1a1a.svg)](#ci-and-code-scanning)
+
+[Try it](#try-it-in-10-seconds) · [Jury mode](#jury-mode) · [Local models](#local-models-ollama) · [Security model](#security-model) · [Architecture](docs/ARCHITECTURE.md)
 
 </div>
 
@@ -22,8 +28,8 @@ You let an AI write the code. Then the same model "checks" its own work, says "l
 
 Local. No cloud. No account. No API keys of its own. Zero dependencies.
 
-<p align="center"><img src="docs/demo.png" width="760" alt="crosscheck jury output: two models independently flag a SQL injection and an expiry off-by-one"></p>
-<p align="center"><sub>Output of <code>crosscheck demo</code> (a simulated, offline walkthrough). Real runs look the same.</sub></p>
+<p align="center"><img src="docs/demo.gif" width="780" alt="crosscheck jury output: two models independently flag a SQL injection and an expiry off-by-one"></p>
+<p align="center"><sub>Recording of <code>crosscheck demo</code>, a simulated offline walkthrough. Real runs produce the same output.</sub></p>
 
 ## Try it in 10 seconds
 
@@ -41,7 +47,7 @@ pipx install git+https://github.com/karhuzin-lgtm/crosscheck
 crosscheck doctor
 ```
 
-You need **at least one reviewer CLI** on your PATH: [`codex`](https://github.com/openai/codex) (recommended, because it runs write-sandboxed), `gemini`, or `claude`.
+You need **at least one reviewer** on your PATH: [`codex`](https://github.com/openai/codex) (recommended, because it runs write-sandboxed), [`ollama`](https://ollama.com) (local and free), `gemini`, or `claude`.
 
 ## Why
 
@@ -86,7 +92,33 @@ crosscheck --jury codex,gemini              # any juror can block
 crosscheck --jury codex,gemini --quorum 2   # block only on issues both models flag
 ```
 
-Every juror reviews the same (redacted) diff in parallel. Findings that point at the same place and describe the same problem are merged, and each one shows **who flagged it**: `2/2 agree` or `only gemini`. Agreed findings sort first. Use `--quorum 2` when you want only high-confidence blocks. If a juror is missing or crashes, the rest still decide, and you're told. Set it permanently with `CROSSCHECK_JURY=codex,gemini`.
+Every juror reviews the same (redacted) diff in parallel, and each one can pin its own model: `--jury codex:gpt-5,ollama:qwen2.5-coder:7b`. Findings that point at the same place and describe the same problem are merged, and each one shows **who flagged it**: `2/2 agree` or `only gemini`. Agreed findings sort first. Use `--quorum 2` when you want only high-confidence blocks. If a juror is missing or crashes, the rest still decide, and you're told. Set it permanently with `CROSSCHECK_JURY=codex,gemini`.
+
+## Local models (Ollama)
+
+No API account and no code leaving your machine:
+
+```bash
+ollama pull qwen2.5-coder:7b
+crosscheck --provider ollama                       # default model: qwen2.5-coder:7b
+crosscheck --provider ollama:deepseek-coder-v2     # any model you've pulled
+crosscheck --jury codex,ollama                     # a cloud model and a local one
+```
+
+An Ollama reviewer is a plain text model with **no tools**: it can't read files or run commands. So, unlike `gemini`/`claude`, it needs no unsandboxed opt-in. `OLLAMA_HOST` is passed through if you run the server elsewhere.
+
+## CI and code scanning
+
+`--sarif` emits [SARIF 2.1.0](https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html), so findings appear as annotations in GitHub code scanning, VS Code, and other SARIF viewers:
+
+```yaml
+# in a workflow where a reviewer CLI is installed and authenticated
+- run: crosscheck --base origin/${{ github.base_ref }} --sarif > crosscheck.sarif || true
+- uses: github/codeql-action/upload-sarif@v3
+  with: { sarif_file: crosscheck.sarif }
+```
+
+`--json` gives a simpler shape for your own scripts: verdict, reviewers, and each finding with the models that flagged it.
 
 ## What has it caught for you?
 
@@ -159,8 +191,8 @@ Zero-config by default (`auto` reviewer, blocks on `warn`+). Override with `CROS
 
 | Key | Env | Default | What it does |
 |---|---|---|---|
-| `provider` | `CROSSCHECK_PROVIDER` | `auto` | `auto` (→ `codex`, write-sandboxed), `codex`, `gemini`, `claude`, or `command` |
-| *(env-only)* | `CROSSCHECK_MODEL` | *(cli default)* | Pin a specific reviewer model. **Env-only** — a `model` in a project file is ignored |
+| `provider` | `CROSSCHECK_PROVIDER` | `auto` | `auto` (→ `codex`, write-sandboxed), `codex`, `gemini`, `claude`, `ollama`, or `command`. Append `:model` to pin a model, e.g. `ollama:llama3.1:8b` |
+| *(env-only)* | `CROSSCHECK_MODEL` | *(cli default)* | Pin the model of a **single** reviewer (in jury mode use `name:model` per juror). **Env-only**: a `model` in a project file is ignored |
 | `threshold` | `CROSSCHECK_THRESHOLD` | `warn` | Minimum severity that blocks: `nit` \| `warn` \| `blocker` |
 | `max_rounds` | `CROSSCHECK_MAX_ROUNDS` | `2` | (Claude Code hook) How many times it will block+re-review before letting you through (env-only) |
 | `fail_open` | `CROSSCHECK_FAIL_OPEN` | `true` | If the reviewer errors, allow the turn (never wedge your session) |
@@ -225,7 +257,7 @@ crosscheck processes an **untrusted diff** and an **untrusted `.crosscheck.json`
 
 ## Contributing
 
-Issues and PRs welcome — new reviewer adapters especially. See [DESIGN.md](DESIGN.md) for the architecture.
+Issues and PRs are welcome, new reviewer adapters especially. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and the [architecture guide](docs/ARCHITECTURE.md). Security reports go through [SECURITY.md](SECURITY.md).
 
 ## License
 

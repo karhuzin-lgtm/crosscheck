@@ -439,5 +439,124 @@ class TestGateJury(unittest.TestCase):
         self.assertIn("flagged by codex, gemini", payload["reason"])
 
 
+@contextlib.contextmanager
+def fake_binaries():
+    """Pretend every reviewer CLI is installed at /usr/bin/<name>."""
+    saved = providers._resolve_binary
+    providers._resolve_binary = lambda name: "/usr/bin/" + name
+    try:
+        yield
+    finally:
+        providers._resolve_binary = saved
+
+
+class TestOllamaAndModels(unittest.TestCase):
+    def test_ollama_default_model_and_no_tools(self):
+        with fake_binaries():
+            rev = providers.resolve(config.Config(provider="ollama"))
+        self.assertEqual(rev.argv, ["/usr/bin/ollama", "run", providers.DEFAULT_OLLAMA_MODEL])
+        self.assertFalse(rev.tools)
+        self.assertEqual(rev.display, "ollama:" + providers.DEFAULT_OLLAMA_MODEL)
+        self.assertIn("OLLAMA_HOST", rev.env_passthrough)
+
+    def test_model_in_spec_keeps_tag_colons(self):
+        with fake_binaries():
+            rev = providers.resolve(config.Config(provider="ollama:llama3.1:8b"))
+        self.assertEqual(rev.argv[-1], "llama3.1:8b")
+        with fake_binaries():
+            rev = providers.resolve(config.Config(provider="codex:gpt-5"))
+        self.assertIn("gpt-5", rev.argv)
+        self.assertEqual(rev.argv[-1], "-")  # stdin marker stays last
+
+    def test_option_like_model_rejected(self):
+        for spec in ("ollama:-h", "codex:--yolo", "ollama:", "ollama:a b"):
+            with fake_binaries(), self.assertRaises(ProviderError):
+                providers.resolve(config.Config(provider=spec))
+
+    def test_no_unsandboxed_opt_in_needed_for_ollama(self):
+        with fake_binaries(), _Env(CROSSCHECK_ALLOW_UNSANDBOXED=None):
+            self.assertEqual(providers.resolve(config.Config(provider="ollama")).name, "ollama")
+
+    def test_project_file_cannot_pick_ollama(self):
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, ".crosscheck.json"), "w") as fh:
+            json.dump({"provider": "ollama:evil"}, fh)
+        with _Env(CROSSCHECK_PROVIDER=None):
+            self.assertEqual(config.load(d).provider, "auto")
+
+    def test_sanitized_env_passthrough_is_opt_in_per_reviewer(self):
+        with _Env(OLLAMA_HOST="http://127.0.0.1:11434", SECRET_TOKEN="x"):
+            plain = providers._sanitized_env()
+            ollama = providers._sanitized_env(("OLLAMA_HOST",))
+        self.assertNotIn("OLLAMA_HOST", plain)
+        self.assertEqual(ollama["OLLAMA_HOST"], "http://127.0.0.1:11434")
+        self.assertNotIn("SECRET_TOKEN", ollama)
+
+    def test_global_model_not_forced_on_every_juror(self):
+        cfg = config.Config(model="gpt-5", jury=["codex", "ollama"])
+        with fake_binaries():
+            revs, _ = engine.resolve_jury(cfg, lambda s: None)
+        codex = [r for r in revs if r.name == "codex"][0]
+        self.assertNotIn("gpt-5", codex.argv)
+        with fake_binaries():
+            single, _ = engine.resolve_jury(config.Config(model="gpt-5"), lambda s: None)
+        self.assertIn("gpt-5", single[0].argv)
+
+    def test_two_ollama_models_are_two_jurors(self):
+        cfg = config.Config(jury=["ollama:a", "ollama:b"])
+        with fake_binaries():
+            revs, _ = engine.resolve_jury(cfg, lambda s: None)
+        self.assertEqual([r.display for r in revs], ["ollama:a", "ollama:b"])
+
+    def test_juror_without_opt_in_is_reported_not_substituted(self):
+        cfg = config.Config(jury=["gemini", "ollama"])
+        with fake_binaries(), _Env(CROSSCHECK_ALLOW_UNSANDBOXED=None):
+            revs, failures = engine.resolve_jury(cfg, lambda s: None)
+        self.assertEqual([r.name for r in revs], ["ollama"])
+        self.assertTrue(any("CROSSCHECK_ALLOW_UNSANDBOXED" in f for f in failures))
+
+    def test_no_read_access_warning_for_toolless_reviewer(self):
+        notes = []
+        out = '{"findings": []}'
+        saved = providers.run
+        providers.run = lambda r, p, t: out
+        try:
+            with fake_binaries():
+                engine.run_review("diff --git a/a b/a\n+x\n",
+                                  config.Config(provider="ollama"), notes.append)
+        finally:
+            providers.run = saved
+        self.assertFalse(any("filesystem reads" in n for n in notes))
+
+
+class TestSarif(unittest.TestCase):
+    def test_structure_and_levels(self):
+        from crosscheck import sarif
+        fs = [F(sev="blocker", cat="security", file="./a.py", line=3, who=["codex", "gemini"]),
+              F(sev="nit", cat="style", line=None, who=["codex"])]
+        doc = sarif.build(fs, [id(fs[0])])
+        self.assertEqual(doc["version"], "2.1.0")
+        res = doc["runs"][0]["results"]
+        self.assertEqual(res[0]["level"], "error")
+        self.assertEqual(res[0]["ruleId"], "crosscheck/security")
+        loc = res[0]["locations"][0]["physicalLocation"]
+        self.assertEqual(loc["artifactLocation"]["uri"], "a.py")
+        self.assertEqual(loc["region"]["startLine"], 3)
+        self.assertTrue(res[0]["properties"]["blocking"])
+        self.assertIn("codex, gemini", res[0]["message"]["text"])
+        self.assertEqual(res[1]["level"], "note")
+        self.assertNotIn("region", res[1]["locations"][0]["physicalLocation"])
+        rule_ids = {r["id"] for r in doc["runs"][0]["tool"]["driver"]["rules"]}
+        self.assertTrue({r["ruleId"] for r in res} <= rule_ids)
+
+    def test_cli_sarif(self):
+        out = _findings_json(("warn", "bug", "a.py", 1, "bad"))
+        with _Env(CROSSCHECK_STATE_DIR=tempfile.mkdtemp(), CROSSCHECK_JURY=None,
+                  CROSSCHECK_PROVIDER=None), fake_providers({"codex": out}):
+            rc, stdout, _ = _cli(["-", "--sarif"], TestCLI.DIFF)
+        self.assertEqual(rc, 1)
+        self.assertEqual(json.loads(stdout)["runs"][0]["results"][0]["level"], "warning")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -70,20 +70,35 @@ def juror_names(cfg: Config) -> List[str]:
 def resolve_jury(cfg: Config, notify: Notify) -> Tuple[List[Reviewer], List[str]]:
     """Resolve every juror. Returns (reviewers, failure messages).
 
+    Each juror may pin its own model (``ollama:qwen2.5-coder:7b``). In jury mode a
+    global ``CROSSCHECK_MODEL`` is NOT applied to every juror (a GPT model name
+    means nothing to gemini) — only a single reviewer uses it.
+
     Duplicates are dropped by resolved name, so ``auto,codex`` runs codex once.
     """
+    names = juror_names(cfg)
+    base = cfg if len(names) == 1 else dataclasses.replace(cfg, model=None)
     reviewers: List[Reviewer] = []
     failures: List[str] = []
     seen = set()
-    for name in juror_names(cfg):
+    for spec in names:
         try:
-            rev = providers.resolve(dataclasses.replace(cfg, provider=name))
+            rev = providers.resolve(dataclasses.replace(base, provider=spec))
         except ProviderError as exc:
-            failures.append("%s: %s" % (name, exc))
+            failures.append("%s: %s" % (spec, exc))
             continue
-        if rev.name in seen:
+        asked = spec.partition(":")[0].strip().lower()
+        if len(names) > 1 and asked in ("gemini", "claude") and rev.name != asked:
+            # resolve() quietly substitutes codex without the opt-in. In a jury that
+            # would silently replace a juror, so leave the seat empty and say why.
+            failures.append(
+                "%s: runs without an OS sandbox; set CROSSCHECK_ALLOW_UNSANDBOXED=1 "
+                "to let it join the jury" % asked
+            )
             continue
-        seen.add(rev.name)
+        if rev.display in seen:
+            continue
+        seen.add(rev.display)
         reviewers.append(rev)
     return reviewers, failures
 
@@ -126,7 +141,7 @@ def run_review(diff_text: str, cfg: Config, notify: Notify) -> Verdict:
     # gemini/claude/command (reachable only behind an explicit env opt-in) have
     # not even that. NO reviewer is isolated from filesystem READS.
     for rev in reviewers:
-        if not rev.sandboxed:
+        if not rev.sandboxed and getattr(rev, "tools", True):
             notify(
                 "reviewer '%s' has no write-sandbox (codex uses --sandbox read-only, "
                 "which blocks writes). No reviewer is isolated from filesystem reads: "

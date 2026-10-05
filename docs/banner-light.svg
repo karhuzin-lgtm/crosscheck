@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="200" viewBox="0 0 880 200" role="img" aria-label="crosscheck — one model shouldn't grade its own homework">
+  <g transform="translate(64 40)">
+    <circle cx="48" cy="60" r="44" fill="none" stroke="#D2662F" stroke-width="9"/>
+    <circle cx="100" cy="60" r="44" fill="none" stroke="#1a1a1a" stroke-width="9" opacity=".9"/>
+    <path d="M60 62 l13 13 l26 -30" fill="none" stroke="#D2662F" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="250" y="104" fill="#1a1a1a" font-family="ui-sans-serif,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="64" font-weight="800" letter-spacing="-2">crosscheck</text>
+  <text x="252" y="142" fill="#5f5a55" font-family="ui-sans-serif,-apple-system,'Segoe UI',Helvetica,Arial,sans-serif" font-size="21">One model shouldn&#8217;t grade its own homework.</text>
+</svg>

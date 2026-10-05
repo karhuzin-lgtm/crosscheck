@@ -1,0 +1,26 @@
+name: Bug report
+description: Something crosscheck did wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations: { required: true }
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The command you ran, and a minimal diff if relevant. Remove anything secret.
+      render: shell
+    validations: { required: true }
+  - type: textarea
+    id: doctor
+    attributes:
+      label: Output of `crosscheck doctor`
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: crosscheck version and OS
+      placeholder: crosscheck 0.2.0 · macOS 15 · Python 3.12
