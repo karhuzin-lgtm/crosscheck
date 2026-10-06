@@ -45,6 +45,10 @@ to the trusted (env/default) baseline — it can never weaken it:
   string (nor clear the env-sourced-command flag). The command comes only from
   ``CROSSCHECK_COMMAND``. (The ``command`` provider is already un-selectable
   from a project file; the command string is refused here too.)
+- ``jury`` / ``quorum`` / ``stats``: TRUSTED, env-only (``CROSSCHECK_JURY`` /
+  ``CROSSCHECK_QUORUM`` / ``CROSSCHECK_STATS``) or a CLI flag the user typed. A
+  hostile repo must not multiply reviewer spend by enlisting extra jurors, nor
+  raise the quorum so that no single reviewer can block.
 - ``include``/``exclude``: IGNORED from the project file entirely, so a hostile
   repo cannot shrink review coverage (e.g. ``exclude=["*"]`` or an empty
   include). They take effect only from env/defaults — put vendored-dir excludes
@@ -145,6 +149,15 @@ class Config:
     provider_from_env: bool = False
     include: List[str] = field(default_factory=lambda: list(DEFAULT_INCLUDE))
     exclude: List[str] = field(default_factory=lambda: list(DEFAULT_EXCLUDE))
+    # Jury mode: several independent reviewers in parallel. Empty = a single
+    # reviewer chosen by ``provider``. TRUSTED, env-only (CROSSCHECK_JURY).
+    jury: List[str] = field(default_factory=list)
+    # How many jurors must independently flag an issue for it to block. 1 = any
+    # juror can block (safest). TRUSTED, env-only (CROSSCHECK_QUORUM).
+    quorum: int = 1
+    # Keep a local, counts-only tally of issues caught (for `crosscheck stats`).
+    # TRUSTED, env-only (CROSSCHECK_STATS).
+    stats: bool = True
 
 
 def _to_bool(value: Any, default: bool) -> bool:
@@ -177,6 +190,20 @@ def _split_globs(raw: str) -> List[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+# Hard cap on jury size: every juror is a full reviewer run (time + spend).
+MAX_JURY = 4
+
+
+def parse_jury(raw: str) -> List[str]:
+    """Parse a comma-separated juror list, lowercased and de-duplicated."""
+    out: List[str] = []
+    for part in raw.split(","):
+        name = part.strip().lower()
+        if name and name not in out:
+            out.append(name)
+    return out[:MAX_JURY]
+
+
 def _apply_env(cfg: Config) -> None:
     """Overlay environment variables onto ``cfg`` in place (TRUSTED source)."""
     env = os.environ
@@ -201,6 +228,12 @@ def _apply_env(cfg: Config) -> None:
     if env.get("CROSSCHECK_COMMAND"):
         cfg.command = env["CROSSCHECK_COMMAND"]
         cfg.command_from_env = True
+    if env.get("CROSSCHECK_JURY"):
+        cfg.jury = parse_jury(env["CROSSCHECK_JURY"])
+    if env.get("CROSSCHECK_QUORUM"):
+        cfg.quorum = _to_int(env["CROSSCHECK_QUORUM"], cfg.quorum)
+    if "CROSSCHECK_STATS" in env:
+        cfg.stats = _to_bool(env["CROSSCHECK_STATS"], cfg.stats)
     # include/exclude are TRUSTED-only (never accepted from the project file).
     # CROSSCHECK_INCLUDE replaces the include list; CROSSCHECK_EXCLUDE extends the
     # sane defaults (so vendored-dir excludes add to, not replace, the baseline).
@@ -313,4 +346,5 @@ def load(cwd: str) -> Config:
     cfg.max_rounds = min(max(cfg.max_rounds, 1), 10)
     cfg.timeout_sec = min(max(cfg.timeout_sec, 1), 600)
     cfg.max_diff_bytes = min(max(cfg.max_diff_bytes, 1000), 2_000_000)
+    cfg.quorum = min(max(cfg.quorum, 1), MAX_JURY)
     return cfg

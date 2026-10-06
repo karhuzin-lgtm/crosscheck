@@ -85,9 +85,23 @@ class Finding:
     line: Optional[int]
     summary: str
     detail: str
+    # Which reviewer(s) raised this finding. Filled in by the engine; in jury
+    # mode a merged finding lists every juror that independently flagged it.
+    reviewers: List[str] = field(default_factory=list)
 
     def rank(self) -> int:
         return SEVERITY_ORDER.get(self.severity, 0)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "severity": self.severity,
+            "category": self.category,
+            "file": self.file,
+            "line": self.line,
+            "summary": self.summary,
+            "detail": self.detail,
+            "reviewers": list(self.reviewers),
+        }
 
 
 @dataclass

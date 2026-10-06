@@ -175,6 +175,24 @@ def _filter_by_globs(raw: str, cfg: Config) -> str:
     return "".join(kept)
 
 
+def prepare(raw: str, cfg: Config) -> str:
+    """Filter a raw unified diff by include/exclude globs and the byte budget.
+
+    Shared by every diff source (working tree, staged, branch range, stdin).
+    Returns "" when nothing reviewable is left.
+    """
+    if not raw or not raw.strip():
+        return ""
+    filtered = _filter_by_globs(raw, cfg)
+    if not filtered.strip():
+        return ""
+    if len(filtered.encode("utf-8", errors="replace")) > cfg.max_diff_bytes:
+        # Truncate on a byte budget while keeping valid UTF-8.
+        clipped = filtered.encode("utf-8", errors="replace")[: cfg.max_diff_bytes]
+        filtered = clipped.decode("utf-8", errors="ignore") + TRUNCATION_NOTICE
+    return filtered
+
+
 def compute(cwd: str, cfg: Config) -> str:
     """Return the filtered, size-bounded review diff, or "" when there's nothing.
 
@@ -187,13 +205,40 @@ def compute(cwd: str, cfg: Config) -> str:
     # Brand-new (untracked) files are invisible to ``git diff HEAD``; append them
     # so new secrets/files still get reviewed. Filtering + truncation follow.
     raw += _untracked_section(cwd, cfg)
-    if not raw.strip():
+    return prepare(raw, cfg)
+
+
+def compute_staged(cwd: str, cfg: Config) -> str:
+    """Review only what is staged for commit (the pre-commit hook's view)."""
+    if not cwd or not is_git_repo(cwd):
         return ""
-    filtered = _filter_by_globs(raw, cfg)
-    if not filtered.strip():
+    return prepare(_run_git(cwd, ["diff", "--cached"]) or "", cfg)
+
+
+def compute_range(cwd: str, base: str, cfg: Config) -> str:
+    """Review everything on this branch since it forked from ``base``.
+
+    Uses ``base...HEAD`` (merge-base semantics), i.e. what a PR would show.
+    Raises ValueError for a ref that could be mistaken for a git option.
+    """
+    if not base or base.startswith("-") or any(c.isspace() for c in base):
+        raise ValueError("invalid base ref: %r" % base)
+    if not cwd or not is_git_repo(cwd):
         return ""
-    if len(filtered.encode("utf-8", errors="replace")) > cfg.max_diff_bytes:
-        # Truncate on a byte budget while keeping valid UTF-8.
-        clipped = filtered.encode("utf-8", errors="replace")[: cfg.max_diff_bytes]
-        filtered = clipped.decode("utf-8", errors="ignore") + TRUNCATION_NOTICE
-    return filtered
+    out = _run_git(cwd, ["diff", "%s...HEAD" % base, "--"])
+    if out is None:
+        raise ValueError("git could not diff against %r (unknown ref?)" % base)
+    return prepare(out, cfg)
+
+
+def summarize(diff_text: str) -> Tuple[int, int, int]:
+    """Return (files, added_lines, removed_lines) for a unified diff."""
+    files = added = removed = 0
+    for line in diff_text.splitlines():
+        if line.startswith("diff --git "):
+            files += 1
+        elif line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return files, added, removed
