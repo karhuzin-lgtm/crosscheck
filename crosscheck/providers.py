@@ -46,10 +46,61 @@ from typing import Dict, List, Optional, Tuple
 from . import redact
 from .config import Config
 
-# Fixed, safe PATH used both to RESOLVE built-in reviewer binaries and as the
-# PATH inside their sanitized environment. Deliberately excludes "." and any
-# cwd-relative or user-writable entry so a cloned repo cannot shadow a binary.
+# System dirs that are always searched first for reviewer binaries. The full
+# search path (see search_path) adds known install dirs and filtered $PATH
+# entries, never ".", relative, repo-internal or world-writable ones, so a
+# cloned repo cannot shadow a binary.
 _SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# Common install locations OUTSIDE the system dirs: Homebrew (macOS),
+# per-user bins (pipx, npm --prefix ~/.local, cargo). Reviewer CLIs installed
+# with `npm i -g` / `brew` usually land in one of these or in a $PATH entry.
+_EXTRA_DIRS = ("/opt/homebrew/bin", "~/.local/bin", "~/.npm-global/bin", "~/.cargo/bin")
+
+
+def _dir_is_safe(path: str, repo: str) -> bool:
+    """True iff ``path`` may be searched for reviewer binaries.
+
+    The system dirs alone miss most real installs (Homebrew, nvm, npm globals),
+    but trusting $PATH blindly lets a repo shadow ``codex``. So a $PATH entry is
+    used only if it is an absolute, existing directory that is NOT inside the
+    repo, NOT world-writable, and owned by root or by us.
+    """
+    if not path or not os.path.isabs(path):
+        return False
+    real = os.path.realpath(path)
+    if _is_within(real, os.path.realpath(repo)):
+        return False
+    try:
+        st = os.stat(real)
+    except OSError:
+        return False
+    if not os.path.isdir(real):
+        return False
+    if os.name != "nt":
+        if st.st_mode & 0o002:
+            return False
+        if st.st_uid not in (0, os.getuid()):
+            return False
+    return True
+
+
+def search_path() -> str:
+    """The PATH used to find reviewer CLIs AND given to them as their PATH.
+
+    System dirs first (so a user dir can't override /usr/bin/git etc.), then
+    known install dirs, then the user's $PATH — each filtered by _dir_is_safe.
+    The child needs the same PATH: npm-installed CLIs are ``#!/usr/bin/env node``
+    scripts and fail if node's own directory is missing.
+    """
+    repo = os.getcwd()
+    dirs: List[str] = []
+    candidates = _SAFE_PATH.split(":") + [os.path.expanduser(d) for d in _EXTRA_DIRS]
+    candidates += os.environ.get("PATH", "").split(os.pathsep)
+    for d in candidates:
+        if d and d not in dirs and _dir_is_safe(d, repo):
+            dirs.append(d)
+    return os.pathsep.join(dirs) or _SAFE_PATH
 
 # Hard per-stream byte cap on captured reviewer output. Enforced DURING capture
 # (not just after) so a runaway/compromised CLI cannot balloon our memory even if
@@ -145,9 +196,9 @@ def _resolve_binary(name: str) -> str:
     resolve to an absolute path, or resolves inside the repo cwd (a repo trying
     to ship its own shadowing binary).
     """
-    resolved = shutil.which(name, path=_SAFE_PATH)
+    resolved = shutil.which(name, path=search_path())
     if not resolved:
-        raise ProviderError("reviewer CLI '%s' not found on the safe PATH." % name)
+        raise ProviderError("reviewer CLI '%s' not found on PATH." % name)
     resolved = os.path.abspath(resolved)
     if not os.path.isabs(resolved):
         raise ProviderError("reviewer CLI '%s' did not resolve to an absolute path." % name)
@@ -314,7 +365,7 @@ def _sanitized_env(extra: Tuple[str, ...] = ()) -> Dict[str, str]:
     out) is the mitigation, not this env. See the README "Security model".
     """
     src = os.environ
-    env: Dict[str, str] = {"PATH": _SAFE_PATH}
+    env: Dict[str, str] = {"PATH": search_path()}
     for key in ("HOME", "LANG", "LC_ALL", "LC_CTYPE") + tuple(extra):
         val = src.get(key)
         if val:

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 # "crosscheck" is taken on PyPI; the installed command is still `crosscheck`.
 name = "crosscheck-cli"
-version = "0.2.0"
+version = "0.2.1"
 description = "One model shouldn't grade its own homework. An independent AI model (or a jury of them) reviews your diff before you accept it."
 readme = "README.md"
 license = { text = "MIT" }

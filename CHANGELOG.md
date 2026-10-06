@@ -2,6 +2,11 @@
 
 All notable changes are listed here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [SemVer](https://semver.org/).
 
+## [0.2.1]
+
+### Fixed
+- Reviewer CLIs installed outside the system dirs were reported as "not installed". This covered Homebrew on macOS (`/opt/homebrew/bin`), npm/nvm globals and `~/.local/bin`, so it affected most Mac users. crosscheck now also searches those dirs and your `$PATH`. It skips relative, repo-internal and world-writable dirs and ones owned by another user, so a repo still can't shadow a reviewer. The reviewer process gets the same PATH, so `#!/usr/bin/env node` CLIs can find node.
+
 ## [0.2.0]
 
 ### Added

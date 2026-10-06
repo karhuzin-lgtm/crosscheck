@@ -558,5 +558,46 @@ class TestSarif(unittest.TestCase):
         self.assertEqual(json.loads(stdout)["runs"][0]["results"][0]["level"], "warning")
 
 
+class TestSearchPath(unittest.TestCase):
+    """Reviewer CLIs outside /usr/bin (Homebrew, npm globals) must be found,
+    without letting a repo or a world-writable dir shadow them."""
+
+    def test_user_dir_on_path_is_searched(self):
+        d = tempfile.mkdtemp()
+        tool = os.path.join(d, "codex")
+        with open(tool, "w") as fh:
+            fh.write("#!/bin/sh\n")
+        os.chmod(tool, 0o755)
+        with _Env(PATH=d + os.pathsep + os.environ.get("PATH", "")):
+            self.assertIn(d, providers.search_path().split(os.pathsep))
+            self.assertEqual(providers._resolve_binary("codex"), tool)
+
+    def test_unsafe_dirs_are_skipped(self):
+        repo = tempfile.mkdtemp()
+        inside = os.path.join(repo, "bin")
+        os.mkdir(inside)
+        open_dir = tempfile.mkdtemp()
+        os.chmod(open_dir, 0o777)
+        saved = os.getcwd()
+        os.chdir(repo)
+        try:
+            with _Env(PATH=os.pathsep.join([inside, open_dir, "relative/bin", ".", ""])):
+                dirs = providers.search_path().split(os.pathsep)
+        finally:
+            os.chdir(saved)
+        for bad in (inside, open_dir, "relative/bin", "."):
+            self.assertNotIn(bad, dirs)
+
+    def test_system_dirs_come_first(self):
+        d = tempfile.mkdtemp()
+        with _Env(PATH=d):
+            dirs = providers.search_path().split(os.pathsep)
+        if "/usr/bin" in dirs:
+            self.assertLess(dirs.index("/usr/bin"), dirs.index(d))
+
+    def test_reviewer_child_gets_the_same_path(self):
+        self.assertEqual(providers._sanitized_env()["PATH"], providers.search_path())
+
+
 if __name__ == "__main__":
     unittest.main()
