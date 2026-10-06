@@ -8,4 +8,4 @@ jury of independent models whose agreement is shown per finding.
 Local, cross-model, fail-open. Standard library only.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
